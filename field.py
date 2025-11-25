@@ -9,7 +9,7 @@
 
 import tensorflow as tf
 from keras import models, layers, utils
-from geometry import N
+from geometry import N, DTYPE
 
 # wraps a simple Sequential model
 # 
@@ -24,7 +24,7 @@ class Field(models.Model):
                  rank = 0, # by default a scalar field
                  hidden_dims = 64, # the hidden dimension of our mlp layers 
                  activation = 'gelu', # activation - i will put gelu for balance between universal differentiability and neuron expressivity - sigmoids suppress large numbers
-                 dtype = tf.float32 # we choose dtype, if wanted
+                 dtype = DTYPE # we choose dtype, if wanted
                  ):
         super().__init__()
 
