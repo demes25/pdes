@@ -30,9 +30,13 @@ def Euclidean(
 ):
     _delta = Delta(N)
 
+    # we expand dimensions for tiling purposes
+    _delta = tf.expand_dims(_delta, axis=0)
+
     # x must be [B, N]
-    def _m(x):
-        return _delta
+    def _m(X):
+        B = tf.shape(X)[0]
+        return tf.tile(_delta, (B, 1, 1))
 
     return (_m, _m)
 
@@ -120,10 +124,13 @@ def Minkowski(
 ):  
     _eta = Eta(N)
 
+    # we expand dimensions for tiling purposes
+    _eta = tf.expand_dims(_eta, axis=0)
+
     # X must be [B, N]
     def _m(X):
         B = tf.shape(X)[0]
-        return tf.tile(_eta, (B, N, N))
+        return tf.tile(_eta, (B, 1, 1))
     
     return (_m, _m)
 
