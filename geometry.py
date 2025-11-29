@@ -3,8 +3,17 @@
 # Nov 2025
 # Spacetimes
 
-from composition import *
-from typing import Tuple
+from context import *
+from typing import Callable, Tuple
+
+# here we define what a function is.
+# 
+# we assume that functions will act individually on points
+# and therefore do not need to decode mesh structure like operators do.
+# 
+# we will assume that the input tensor for any function look slike [B, ...]
+# where the mesh axes are flattened into the batch dimension.
+Function = Callable[..., tf.Tensor]
 
 # define some geometries
 

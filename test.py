@@ -3,20 +3,18 @@
 # Nov 2025
 # Test
 
-from observable import Observable
-from domains import Domain
 from operators import *
 from keras.models import save_model, load_model
 from keras.optimizers import AdamW
 from geometry import Euclidean
-from composition import *
 
 
-
-# spring oscillation is repetitive in time - say we allow to train over 20 meters (should yield 20 oscillations)
-step = 0.01
+# we test our current abilities.
+# i'll try to find the derivative and second derivative of the square function
+# using our mesh+convolution framework.
+step = 0.05
 start = 1.0
-end = 9.0 
+end = 20.0 
 
 
 # we'll take the value to be 0 at t=0 and x=0
@@ -26,11 +24,19 @@ dX = tf.constant([step])
 ranges = tf.constant([[start], [end]])
 domain = Domain(Euclidean(1), ranges, dX) # this is now [b, b, 1]
 
-squart, func_shape = domain.image(tf.sqrt, True)
+base_image = Image(domain, pad=2, all_around=False)
+base_mesh = tf.squeeze(base_image.view())
 
-squart_dif, squart_shape = Partials(domain)(squart, func_shape)
+square_image = base_image.apply(tf.square, mutable=True)
+square_mesh = tf.squeeze(square_image.view())
 
-result = tf.stack([tf.squeeze(squart)[:-1], tf.squeeze(squart_dif)[:-1]], axis=1)
+grad = Gradient(square_image)
+grad_mesh = tf.squeeze(grad.view())
+
+laplace = ScalarLaplacian(square_image)
+laplace_mesh = tf.squeeze(laplace.view())
+
+result = tf.stack([square_mesh, grad_mesh, laplace_mesh], axis=1)
 
 # i will make a plot here as well:
 
@@ -40,9 +46,6 @@ import tfplot
 def plot(x, y, fig=None, ax=None):
     ax.plot(x, y)
     return fig
- 
-output = tf.squeeze(result)
-domain = tf.squeeze(domain.mesh)[:-1]
 
-pl = plot(domain, output)
+pl = plot(base_mesh, result)
 tf.io.write_file("plot.png", tf.io.encode_png(pl))

@@ -9,7 +9,7 @@ from keras.optimizers import Optimizer
 from keras.models import Model
 from keras.utils import Progbar
 
-from composition import *
+from functions import *
 from geometry import Geometry
 from lagrangians import Functional, FunctionalGenerator
 from algebra import Norm
