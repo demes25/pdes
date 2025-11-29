@@ -8,6 +8,8 @@ DTYPE : tf.DType = tf.float32
 # some useful c-numbers
 zero : tf.Tensor = tf.constant(0, dtype=DTYPE)
 one : tf.Tensor = tf.constant(1, dtype=DTYPE)
+two : tf.Tensor = tf.constant(2.0, dtype=DTYPE)
+pi : tf.Tensor = tf.constant(3.14159265359, dtype=DTYPE)
 half : tf.Tensor = tf.constant(0.5, dtype=DTYPE)
 quarter : tf.Tensor = tf.constant(0.25, dtype=DTYPE)
 

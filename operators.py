@@ -103,7 +103,6 @@ class Domain:
 # specified amount of padding.
 def padding_adjuster(
         pad, # the amount of padding to "throw away" 
-        all_around, # whether we pad all-around (at the start and at the end), or only at the end of each axis
 
         mesh_len, # the amount of axes to cut
         # the leading axes are assumed to be the mesh axes
@@ -124,7 +123,7 @@ def padding_adjuster(
         return [slice(None) for _ in range(mesh_len+func_len)]
     
     # we return [pad:-pad, pad:-pad, ..., pad:-pad, :, :, ..., :]
-    pad_slice = slice(pad, -pad) if all_around else slice(0, -pad)
+    pad_slice = slice(pad, -pad)
     
     if func_len == 0:
         return [pad_slice for _ in range(mesh_len)]
@@ -145,11 +144,12 @@ class Image:
         # this should be none  ^^ only if mesh is None
 
         pad = 0, # how much padding we have
-        all_around = True # whether we pad all-around (at the start and at the end), or only at the end of each axis
     ):
         self.domain = domain
         
         if mesh is None:
+            # if the mesh is None -- this becomes a coordinate image.
+            # the discretized domain.
             self.mesh = domain.discretize(pad=pad)
         else:
             self.mesh = mesh
@@ -163,10 +163,9 @@ class Image:
 
         # note that the unpadded mesh shape [n1, n2, n3, ..., nN] is stored in domain.shape 
         self.pad = pad
-        self.all_around = all_around 
 
         # "unpads" the padded mesh
-        self.unpadded_slicer = padding_adjuster(pad, all_around, mesh_len=domain.dimension, func_len = len(self.func_shape))
+        self.unpadded_slicer = padding_adjuster(pad, mesh_len=domain.dimension, func_len = len(self.func_shape))
 
         if geometry is None:
             assert mesh is None, 'Parameter "geometry" may only be None if we are calculating the image directly of the domain points'
@@ -204,14 +203,16 @@ class Image:
         # we can also flatten if needed, such as for function application
         return tf.reshape(mesh, shape=[-1, *self.func_shape]) if flattened else mesh
 
-    def _mutate(self, new_mesh : tf.Tensor, new_func_shape : List[int]) -> 'Image':
+    def _mutate(self, new_mesh : tf.Tensor, new_func_shape : List[int] | None = None) -> 'Image':
         # mutates this image:
         # if we want to hold the mesh of a new function, 
         # but we have the same padded_mesh_shape 
         # and overall metadata
         self.mesh = new_mesh 
-        self.func_shape = new_func_shape 
-        self.unpadded_slicer = padding_adjuster(self.pad, self.all_around, mesh_len=self.domain.dimension, func_len = len(self.func_shape))
+
+        if new_func_shape is not None:
+            self.func_shape = new_func_shape 
+            self.unpadded_slicer = padding_adjuster(self.pad, mesh_len=self.domain.dimension, func_len = len(self.func_shape))
 
         return self 
     
@@ -245,8 +246,8 @@ class Image:
             
         else:
         # otherwise we return a new image.
-            return Image(self.domain, func_mesh, total_shape, self.geometry, self.pad, self.all_around)
-        
+            return Image(self.domain, func_mesh, total_shape, self.geometry, self.pad)
+
     
 
 
@@ -328,7 +329,6 @@ def prep_for_kernel(image : Image):
     return (substrate, func_size)
 
 
-
 # --- OPERATORS --- # 
 
 # now we define operators.
@@ -341,32 +341,25 @@ Operator = Callable[[Image], Image]
 def Partials(
     wrt = [] # the list of coordinate indices over which to compute partials
 ) -> Operator:
-    
+
     # returns tensor of relevant partial derivatives of f over the given domain, 
     # same coordinate order as in wrt, stacked along last axis.
     def _h(phi : Image) -> Image:
         domain = phi.domain
 
         substrate, func_size = prep_for_kernel(phi)
-
-        # note that this will reduce the padding of the image by 1.
-        new_pad = phi.pad - 1
-
-        if new_pad < 0:
-            raise UserWarning(f'Padding {phi.pad} of object {phi} is about to be reduced by 1.')
-
-        # we reduce padding to account for convolution.
-        base_shape = PARTIAL_BASE[1]
-        pad_loss = base_shape[0] - 1
-        result_shape = tf.concat([phi.padded_mesh_shape - pad_loss, phi.func_shape], axis=0)
-
         outputs = []
 
         # if axes are not specified, we calculate over all variables by default.
         for i in (wrt if wrt else range(domain.dimension)):
             kernel = CreateKernel(PARTIAL_BASE, domain.dimension, func_size, i)
-            post_kernel = tf.nn.convolution(substrate, kernel)
-            output = tf.reshape(post_kernel, result_shape)
+            
+            # we pad convolutions to the same size as before, and account for this by including
+            # sufficient padding beforehand.
+            post_kernel = tf.nn.convolution(substrate, kernel, padding='SAME')
+            
+            output = tf.squeeze(post_kernel, axis=0)
+            output = tf.reshape(output, shape=phi.shape)
 
             outputs.append(output/domain.steps[i]) # divide by relevant dx
         
@@ -376,11 +369,7 @@ def Partials(
 
         # ok. now we correct the padding of the geometry functions:
         # this operator reduces the padding by one, so we also adjust like so:
-        metric_adjuster = padding_adjuster(1, phi.all_around, mesh_len=domain.dimension, func_len=2)
-        g, g_inv = phi.geometry
-        dphi_geometry = (g[metric_adjuster], g_inv[metric_adjuster])
-
-        dphi = Image(domain=domain, mesh=final_mesh, shape=final_shape, geometry=dphi_geometry, pad=new_pad, all_around=phi.all_around)
+        dphi = Image(domain=domain, mesh=final_mesh, shape=final_shape, geometry=phi.geometry, pad=phi.pad)
         
         return dphi
     
@@ -403,17 +392,18 @@ def VectorDivergence(
 ) -> Operator:
     
     def _h(A : Image) -> Image:
+        assert len(A.func_shape) == 1, f'{A} must be a vector field'
         # this is [B, N]
         flat_A = A.view(padded=True, flattened=True)
         
         # TODO: write a generalized raising/lowering function
         g, g_inv = A.geometry
-        dVol = tf.sqrt(tf.abs(tf.linalg.det(g))) # sqrt(|detg|)
+        sqrt_g = tf.sqrt(tf.abs(tf.linalg.det(g))) # sqrt(|detg|)
 
         N = A.domain.dimension
 
         # we reshape to batch indices
-        flat_dVol = tf.reshape(dVol, shape=[-1]) # [B]
+        flat_sqrt_g = tf.reshape(sqrt_g, shape=[-1]) # [B]
 
         if covariant:
             # if A is covariant, we must raise.
@@ -423,25 +413,25 @@ def VectorDivergence(
             flat_A = tf.einsum('bij,bj->bi', flat_g_inv, flat_A) # this is now [B, N]
         
 
-        exp_dVol = tf.expand_dims(flat_dVol, axis=-1) # [B, 1]
+        exp_sqrt_g = tf.expand_dims(flat_sqrt_g, axis=-1) # [B, 1]
         
-        flat_A = flat_A * exp_dVol # [B, N]
+        flat_A = flat_A * exp_sqrt_g # [B, N]
         # this is sqrt(g) partial^mu phi
 
         # now we must take gradients again, and then trace over mu.
         #
         # since we have not affected any metadata, (shape is same, padding is same)
-        # we can just re-expand dVol_raised and replace image.mesh by this new mesh,
+        # we can just re-expand sqrt_g_raised and replace image.mesh by this new mesh,
         # and then apply the gradient operator
 
         new_mesh = tf.reshape(flat_A, A.shape)
         
         # if we are allowed to alter A in-place, then we replace the unprepped mesh with the prepped mesh 
         if mutable:
-            A.mesh = new_mesh
+            A._mutate(new_mesh=new_mesh)
         else:
             # otherwise we make a new image
-            A = Image(A.domain, new_mesh, A.shape, A.geometry, A.pad, A.all_around)
+            A = Image(A.domain, new_mesh, A.shape, A.geometry, A.pad)
 
         # we take derivatives.
         derivs : Image = Gradient(A)
@@ -455,11 +445,8 @@ def VectorDivergence(
         result_mesh = tf.reshape(flat_result, shape=derivs.padded_mesh_shape) 
         
         # the only thing left to do is divide by the 'volume form'
-        # we already have it calculated, just need to adjust for padding and divide.
-        dVol = dVol[padding_adjuster(1, A.all_around, N)]
-
         # voila! we have the generalized laplacian/beltrami
-        div_mesh = result_mesh/dVol
+        div_mesh = result_mesh/sqrt_g
 
         # now - the only difference between this and the hessian 
         # is the function shape. here it is [], but for the hessian it is [N, N]
@@ -478,6 +465,25 @@ def VectorDivergence(
 def ScalarLaplacian(phi : Image) -> Image:
     # we calculate the laplacian for a scalar field.
     # this looks like div(grad(phi))
+    assert len(phi.func_shape) == 0, f'{phi} must be a scalar field'
     div : Operator = VectorDivergence(covariant=True, mutable=True)
 
     return div(Gradient(phi))
+
+
+
+# We formulate some other useful operators.
+def HelmholtzOperator(k : tf.Tensor): # k should be a scalar
+    
+    # phi should be a scalar also
+    def _h(phi : Image) -> Image:
+        assert len(phi.func_shape) == 0, f'{phi} must be a scalar field'
+
+        # Laplace(phi) + k(phi) = 0
+        laplace_phi = ScalarLaplacian(phi)
+
+        k_phi_mesh = k * phi.mesh 
+
+        return laplace_phi._mutate(new_mesh=laplace_phi.mesh + k_phi_mesh)
+        
+    return _h
