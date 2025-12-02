@@ -7,7 +7,7 @@ import tensorflow as tf
 from context import *
 from typing import Callable
 from lattices import Domain, Image, Integral
-from functions import Function, gaussian_fn, norm_sq_fn, reciprocal_fn
+from functions import *
 
 
 # --- DISTRIBUTIONS ---- #
@@ -118,5 +118,8 @@ def Reciprocal(center : tf.Tensor, epsilon : tf.Tensor = 1e-4, normalize=True, s
     return FunctionDistribution(reciprocal_fn(center=center, epsilon=epsilon), normalize=normalize, scale=scale)
 
 
+
+def Sine(wavenum : tf.Tensor, normalize=True, scale : tf.Tensor = one) -> Distribution:
+    return FunctionDistribution(sine_fn(wavenum), normalize=normalize, scale=scale)
 
 

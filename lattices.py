@@ -119,12 +119,6 @@ def padding_adjuster(
 # and other such operations on our tensor lattice.
 @dataclass
 class Lattice:
-    grid : tf.Tensor # the grid we are wrapping
-    # in general, the parameter should look like [(B), *M, *V],
-    # where B is the (optional) batch axis,
-    # M = [m1, m2, ..., mN] is the lattice shape,
-    # and V = [v1, v2, ..., vM] is the entry shape
-
     lattice_shape : Shape # the (UNPADDED) lattice shape - i.e. the leading (ignoring B) dimensions of @param grid that represent the 'lattice' axes which we will use to navigate the lattice 
     entry_shape : Sequence[int] # the entry shape - i.e. the ending dimensions of @param grid that represent the 'component' axes of some value evaluated at the corresponding lattice point, must SPECIFICALLY be an unpackable python structure of integers
 
@@ -133,6 +127,19 @@ class Lattice:
 
     leading_shape : Shape # the total shape of the PADDED lattice along with the initial batch dimension
     shape : Shape # the total shape of the PADDED grid
+
+    grid : tf.Tensor | None = None, # the grid we are wrapping
+    # in general, the parameter should look like [(B), *M, *V],
+    # where B is the (optional) batch axis,
+    # M = [m1, m2, ..., mN] is the lattice shape,
+    # and V = [v1, v2, ..., vM] is the entry shape
+    #
+    # patch -- previously grid was at the top of the attributes and did not allow None, 
+    # i have now allowed None here so that we can treat "lattice generators" similarly to regular lattices.
+    # if grid is None, it is expected that the view() method will be somehow overridden to generate a lattice to return. 
+    # the reason for this is that holding DOMAINs statically throughout training has proven far more memory-intensive 
+    # (especially for my 6GB gpu) than generating them from scratch each time we want to view them, and then deleting 
+    # to free up memory for gradients. so I will include the choice to be dynamic with the creation of large lattices.
 
     padding : int = 0 # desired amount of padding.
     batches : int = 1 # B, the amount of batches in grid.
@@ -146,6 +153,8 @@ class Lattice:
     # we view the entire grid as a tensor.
     # so this returns [B, n1, n2, ..., nN, *entry_shape]
     def view(self, padded=False, flattened=False) -> tf.Tensor:
+        assert self.grid is not None, 'The view() method must be overridden for lattice generators.'
+
         # this is good if we have padding - we can view with/without padding at will.
         grid = self.grid if padded else self.grid[self.unpadded_slicer]
 
@@ -172,7 +181,9 @@ class Domain(Lattice):
 
         timed : bool = False, # we mark whether or not the first non-batch axis is temporal.  
         padding : int = 0, # we allow padding around the boundary for convolution purposes
-        batches : int = 1 # how many batches we want. by default, 1 is a good choice, but we may want to explicitly broadcast multiple copies of our coordinate grid.
+        batches : int = 1, # how many batches we want. by default, 1 is a good choice, but we may want to explicitly broadcast multiple copies of our coordinate grid.
+    
+        dynamic : bool = False # we include the choice to not store the entire lattice statically, but recreate it dynamically per viewing. useful if memory is tight
     ):
         
 
@@ -197,6 +208,9 @@ class Domain(Lattice):
         # each entry is a 1-tensor representing a tuple of coordinates
         entry_shape = [dimension]
         rank = 1
+
+        if dynamic:
+            coordinates = None 
     
         super().__init__(grid=coordinates, lattice_shape=lattice_shape, entry_shape=entry_shape, dimension=dimension, rank=rank, leading_shape=leading_shape, shape=shape, padding=padding, batches=batches)
         
@@ -208,6 +222,13 @@ class Domain(Lattice):
         # and the discrete steps between points, like, x in [0.0, 5.0] with dx=0.001
         self.steps = steps
 
+        if dynamic:
+            def view(padded=False, flattened=False) -> tf.Tensor:
+                grid = discretize(ranges=ranges, steps=steps, padding=padding if padded else 0, batches=batches)
+                return tf.reshape(grid, shape=[-1, dimension]) if flattened else grid
+            
+            self.view = view
+        
         # we store the metric functions
         self.geometry = geometry
 

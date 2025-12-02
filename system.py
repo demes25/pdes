@@ -109,13 +109,24 @@ class System:
         domain : Domain, # domain over which to train. should be a collection of B points [B, N]
         optimizer : Optimizer, 
         epochs = 10,
-        boundary_weight : Callable[[int], float | tf.Tensor] | tf.Tensor = half # boundary weight function, should either be a scalar or return a scalar
+        boundary_weight : Callable[[int], float | tf.Tensor] | tf.Tensor = half, # boundary weight function, should either be a scalar or return a scalar
+        dynamic : bool = False # allow the forcing_image to be created at each iteration from scratch
     ):
         # we put a nice little progress bar for prettiness
         bar = Progbar(epochs, stateful_metrics=['operator loss', 'boundary penalty'])
-       
-        forcing_image = self.forcing_term(domain)
-       
+
+        # because i wrote this before I figured out that the memory couldn't take it,
+        # i must now jump through loops to make dynamic forcing-image calculation possible. yay.
+        if dynamic:
+            # if dynamic, calculates from scratch each call
+            def forcing_image():
+                return self.forcing_term(domain)
+        else:
+            # otherwise, stores a copy in-scope.
+            _forcing = self.forcing_term(domain)
+            def forcing_image():
+                return _forcing 
+            
         modelOperator = NetworkOperator(U)
 
         if self.boundary_penalty is None:
@@ -123,13 +134,18 @@ class System:
             for epoch in range(epochs):
                 with tf.GradientTape() as tape:
                     # we apply our model
-                    solution_image = modelOperator(forcing_image)
-                    loss_value = self.operator_loss(solution_image=solution_image, forcing_image=forcing_image) 
+                    solution_image = modelOperator(forcing_image())
+                    loss_value = self.operator_loss(solution_image=solution_image, forcing_image=forcing_image()) 
+
+                del solution_image
 
                 # apply gradients
                 gradients = tape.gradient(loss_value, U.trainable_variables)
                 optimizer.apply_gradients(zip(gradients, U.trainable_variables))  
-
+                
+                del gradients 
+                del tape
+                
                 bar.update(epoch + 1, values=[('operator loss', loss_value.numpy()), ('loss', loss_value.numpy())])
 
         # if boundary_weight is a constant - just go about as normal
