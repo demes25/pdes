@@ -24,44 +24,48 @@ NAME = 'test6'
 # i'll try to find the derivative and second derivative of the square function
 # using our mesh+convolution framework.
 step = 0.05
-epsilon = step*step 
-
 padding = 32
 # now we find the relevant ranges by looking at our desired side length 256
 # (256 - 2 * 16) * 0.05 = 4.8
 # so do:
-start = -4.8
-end = 4.8
+start = -6.4
+end = 6.4
 
 # we want each point to look like [B, N]
 dX = tf.constant([step, step])
 ranges = tf.constant([[start, start], [end, end]])
 domain = Domain(Euclidean(2), ranges, dX, padding=padding, dynamic=True) # this is now [b, b, 1])
 
-k = pi/9.6 # our size is 9.6
+k = pi/12.8 # our size is 12.8
 
 # we now try training over many different forcing terms
-#def forcing_term(center, var, scale, wavenum):
-#    return BatchDistribute([reciprocal_fn(center, epsilon=epsilon), gaussian_fn(center, var), sine_fn(wavenum)], normalize=False, scale=scale)
-
-params = [([-0.5, 0.0], 0.02), ([1.0, -0.4], 0.03), ([2.1, 0.1], 0.04), ([2.3, 1.7], 0.05), ([1.3, 4.3], 0.06)]
-
 forcing_terms : List[Distribution] = [
-    *[Gaussian(x, y, scale=two)
-    for x, y in params],
-    #*[Reciprocal(x) for x, _ in params]
+    Reciprocal([-0.5, 0.0], scale=one),
+    Gaussian([-1.2, 0.4], 0.0125, scale=one),
+    Sine(k, normalize = False, scale= -k*k),
+
+    Reciprocal([0.2, -1.4], scale=two),
+    Gaussian([-0.3, 1.6], 0.0175, scale=two),
+    Sine(k*2, normalize = False, scale= -4*k*k),
+
+    Reciprocal([-0.8, 1.0], scale=half),
+    Gaussian([0.9, 0.7], 0.0225, scale=half),
+    Sine(k*3, normalize = False, scale= -9*k*k),
+
+    Reciprocal([-0.5, -1.9], scale=one),
+    Gaussian([0.1, 0.5], 0.0275, scale=two),
+    Sine(k*4, normalize = False, scale= -16*k*k)
 ]
 
 
 if MODELPATH is None:
     system = System(2, operator=FlatSpatialLaplacian, pointwise_loss=tf.square)
 
-    model = SpatialKernel(shape=[], dims=2, size=5, depth=5, init_filters=32, activation='relu')
+    model = SpatialKernel(shape=[], dims=2, size=11, depth=5, init_filters=32, activation='relu')
 
-    for i in range(3):
-        for f in forcing_terms:
-            system.force(f)
-            system.train(model, domain, optimizers.AdamW(learning_rate=1e-5), epochs=3, dynamic=True)
+    for f in forcing_terms:
+        system.force(f)
+        system.train(model, domain, optimizers.AdamW(), epochs=18, dynamic=True)
 else:
     model = load_model(MODELPATH)
 
