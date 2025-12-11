@@ -97,7 +97,7 @@ class System:
 
         loss_image.grid = loss_grid
 
-        return Integral(loss_image, average=False) # we integrate the loss over the domain and return.
+        return Integral(loss_image, average=True) # we integrate the loss over the domain and return.
     
 
 
@@ -110,7 +110,8 @@ class System:
         optimizer : Optimizer, 
         epochs = 10,
         boundary_weight : Callable[[int], float | tf.Tensor] | tf.Tensor = half, # boundary weight function, should either be a scalar or return a scalar
-        dynamic : bool = False # allow the forcing_image to be created at each iteration from scratch
+        dynamic : bool = False, # allow the forcing_image to be created at each iteration from scratch
+        noise : Callable[[tf.Tensor, tf.Tensor], Operator] | None = None
     ):
         # we put a nice little progress bar for prettiness
         bar = Progbar(epochs, stateful_metrics=['operator loss', 'boundary penalty'])
@@ -120,12 +121,14 @@ class System:
         if dynamic:
             # if dynamic, calculates from scratch each call
             def forcing_image():
-                return self.forcing_term(domain)
+                f = self.forcing_term(domain)
+                return f if noise is None else noise(f)
         else:
             # otherwise, stores a copy in-scope.
-            _forcing = self.forcing_term(domain)
+            f = self.forcing_term(domain)
+            f = f if noise is None else noise(f)
             def forcing_image():
-                return _forcing 
+                return f
             
         modelOperator = NetworkOperator(U)
 
@@ -134,13 +137,15 @@ class System:
             for epoch in range(epochs):
                 with tf.GradientTape() as tape:
                     # we apply our model
-                    solution_image = modelOperator(forcing_image())
+                    f_ = forcing_image()
+                    solution_image = modelOperator(f_)
                     loss_value = self.operator_loss(solution_image=solution_image, forcing_image=forcing_image()) 
 
                 del solution_image
 
                 # apply gradients
                 gradients = tape.gradient(loss_value, U.trainable_variables)
+                gradients, _ = tf.clip_by_global_norm(gradients, clip_norm = one) # clip gradients to norm 1
                 optimizer.apply_gradients(zip(gradients, U.trainable_variables))  
                 
                 del gradients 

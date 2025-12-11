@@ -243,6 +243,15 @@ def FlatSpatialLaplacian(phi : Image) -> Image:
 
 
 
+# I am adding a noise operator that will introduce noise into the image
+def NoiseOperator(mean : tf.Tensor = zero, stddev : tf.Tensor = one) -> Operator:
+    def _h(x : Image) -> Image:
+        noise = tf.random.normal(shape=x.shape, mean=mean, stddev=stddev, dtype=x.grid.dtype)
+
+        return Image(domain=x.domain, grid=x.grid + noise, shape=x.shape, entry_shape=x.entry_shape, leading_shape=x.leading_shape, batches=x.batches)
+    
+    return _h
+
 
 '''
 
