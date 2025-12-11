@@ -246,7 +246,8 @@ class Image(Lattice):
         # we trust in the user that the grid passed here will be compatible with the domain. i.e. the leading dimensions [B, n1, n2, ..., nN] will be equal to those of the coordinate grid
         grid : tf.Tensor, # the grid that we wrap here, a tensor of the shape [B, n1, n2, ..., nN, *V] where V is the shape of the lattice value at (x1, x2, ..., xN)
         
-        shape : tf.Tensor | None = None,
+        shape : Shape | None = None,
+        leading_shape : Shape = None,
         entry_shape : Sequence[int] | None = None,
 
         batches : int = 1 # how many batches we have (per batch in the domain). In Images, this tells us how many batches PER DOMAIN BATCH. so the total amount of batches B is self.batches * self.domain.batches
@@ -260,6 +261,9 @@ class Image(Lattice):
         if entry_shape is None:
             entry_shape = shape[(1 + domain.dimension):].numpy().tolist() # we keep this as a list for manipulability, this is F from above
         
+        if leading_shape is None:
+            leading_shape = shape[:(1+domain.dimension)]
+            
         rank = len(entry_shape)
 
         super().__init__(
@@ -268,7 +272,7 @@ class Image(Lattice):
             entry_shape=entry_shape, 
             dimension=domain.dimension, 
             rank=rank, 
-            leading_shape=domain.leading_shape, 
+            leading_shape=leading_shape, 
             shape=shape, 
             padding=domain.padding,
             batches=batches
@@ -316,7 +320,7 @@ class Image(Lattice):
 #
 # TODO: domain.steps may not be constant in the domain per discretized point
 # also, their product may be different. work on generalizing to non-cartesian coordinates.
-def Integral(image : Image, average=False) -> tf.Tensor: 
+def Integral(image : Image, average=False, per_batch=False) -> tf.Tensor: 
     flattened = image.view(flattened=True) 
 
     '''
@@ -334,5 +338,19 @@ def Integral(image : Image, average=False) -> tf.Tensor:
     '''
     integrable = flattened
 
+    if per_batch:
+        # if we are doing this per batch, we want to keep the batch dimension and sum
+        # only over the lattice
+        batch_dims = image.batches * image.domain.batches
+        shape = [batch_dims, -1, *image.entry_shape] if image.rank else [batch_dims, -1]
+        integrable = tf.reshape(integrable, shape=shape)
+
+        reduction_axis = 1
+        # in this case we return [B, *entry_shape]
+    
+    else:
+        # in this case we return [*entry_shape]
+        reduction_axis = 0
+
     # if average, we return the mean over the lattice
-    return tf.reduce_mean(integrable, axis=0)  if average else tf.reduce_sum(integrable, axis=0)
+    return tf.reduce_mean(integrable, axis=reduction_axis)  if average else tf.reduce_sum(integrable, axis=reduction_axis)

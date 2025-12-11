@@ -89,7 +89,7 @@ def BatchDistribute(funcs : Sequence[Function], normalize : bool = True, scale :
 
         func_grids = tf.concat(func_grids, axis=0) # concat along the batch axis
 
-        func_image = Image(domain=x, grid=func_grids, shape=total_shape, entry_shape=func_shape, batches=len(funcs))
+        func_image = Image(domain=x, grid=func_grids, entry_shape=func_shape, batches=len(funcs))
 
         sc = scale 
 
@@ -165,7 +165,7 @@ def Gaussian(mean : tf.Tensor, variance : tf.Tensor, normalize = True, scale : t
 # x should be [B, N]
 # center should be [N]
 # epsilon should be [] -- the small term we use to offset division by zero.
-def Reciprocal(center : tf.Tensor, epsilon : tf.Tensor = 1e-4, normalize=True, scale : tf.Tensor = one) -> Distribution:
+def Reciprocal(center : tf.Tensor, epsilon : tf.Tensor = 1e-6, normalize=True, scale : tf.Tensor = one) -> Distribution:
     return Distribute(reciprocal_fn(center=center, epsilon=epsilon), normalize=normalize, scale=scale)
 
 
