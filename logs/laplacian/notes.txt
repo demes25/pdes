@@ -1,0 +1,76 @@
+NOTE: THIS IS CONTAINS THE SAME INFROMATION AS /logs/laplace 
+I INCLUDE THIS FOLDER TO MAINTAIN CONSISTENCY WITH GITHUB LINKS.
+
+Some notes on the 2d Flat Laplacian tests.
+
+--- Early tests ---
+
+The early tests were completed by approximating the Laplacian as a composition of two first-order differential operators.
+In the discrete case, I used the right-handed (rh, [-1, 1]/dx) and centered (c, [-1, 0, 1]/2dx) first-derivative kernels 
+and applied them twice over the proposed solution image to yield the 'reported forcing term' i.e. the forcing term as reconstructed
+from the proposed solution. 
+This yielded a skewed training objective, since the flat-space Laplacian solution kernel should be symmetric around the forcing term -
+i.e. only dependent on the radial distance from the forcing term, and the first-order kernels mentioned above are not symmetric.
+The next tests used the symmetric second-derivative kernel ([1, -2, 1]/dx^2) to account for this and yielded significantly better results.  
+
+
+All the following test models were trained on 8 different forcing terms with 20-25 epochs each.
+For most of them, I used a mesh separation of 0.05 and a network kernel size of 11.
+For each forcing term, there are png files in the 'imgs' folders containing - for each forcing term - 
+the solution image, forcing image, and reported forcing image (result of applying the laplace operator on the solution image).
+
+--- Test 1 ---
+(the same results detailed in the following are also visible in Test 2, whose pictures are a lot prettier)
+
+Test 1 was conducted using a series of "delta distributions" (one-hot meshes that were normalized to integrate to 1) and
+gaussian distributions of various sharpness as forcing terms.
+Qualitatively, one can see in the images that the forcing term reconstruction was far more effective for less sharp ('blurred') distribution.
+For example, the 0th forcing term is a delta function. The reconstruction visibly destroys information about the highly localized delta term, though the solution image does not 'look' incorrect.
+However, the 7th forcing term is a blurry gaussian. The reconstruction is much more effective at maintaining this general structure.
+
+This effectively produces a tentative uncertainty principle, which I will phrase as "highly localized distributions tend to lose information under discretized solution models."
+I will call this an "upper bound on locality"
+
+
+--- Test 2 ---
+
+Test 2 is similar to Test 1, but I skipped training altogether on delta functions as they represent a discontinuity in a continuous solution model (which muddles things up...).
+I instead used only gaussians of decreasing sharpness. The resulting images and solutions are much smoother and symmetric around the forcing terms, which is reassuring!
+
+These also reinforce the previous observation of a potential uncertainty principle, as reconstructions for the earlier, sharper forcing terms lost much more information.
+
+
+--- Test 3 ---
+
+Test 3 was conducted using a series of "reciprocal distributions" 1/(|x| + epsilon) and
+gaussian distributions of various sharpness as forcing terms.
+A previous undocumented try (Test 2.5, maybe) revealed that the reconstructability of the reciprocal forcing term depends heavily
+on the value of epsilon and the fineness of the mesh. For too low an epsilon or too coarse a mesh, the proposed solution of "Laplace U = 1/r" defaulted do 0.
+I found that a good rule of thumb was to set epsilon close to the numerical value of our mesh cell volume dXdY...dZ. That is precisely what I did for Test 3, 
+and this is visible in the images. Some uncertainty is visible for the reciprocals distributions due to the singularity 
+(or rather, large finite discrete localized value in this case) but otherwise the results are reasonable and promising considering that our mesh is still coarse
+proportional to our domain size. 
+Note the qualitatively correct effect of the laplace solution operator on reciprocal distributions (0th set of images, for example) and the 
+interesting balance between locality and uncertainty in the relevant reconstructed force terms. Also note the ring-like perturbations in the reconstructed Gaussian forcing terms.
+This did not happen last time so it may be the effect of a slighlty different loss minimum. Though similar rings are visible in Test 4. 
+
+This test was the most qualitatively correct in terms of the solution images (the reconstruction images were better for Test 2 for the blurrier forcing terms).
+
+To add onto our uncertainty principle's "higher bound on locality", note the above statement that suppressing the reciprocal singularity 'too much' - i.e. "constraining" the 
+size of the corresponding discrete large local value - defaulted the proposed solution to zero. 
+This introduces the idea of a "lower bound on locality". 
+We now can qualitatively identify that there is some notion of "focus" when it comes to such distributions. We can be "in focus" or "out of focus",
+and I propose that this is dependent on the size of our domain, our mesh separation dX, our network kernel size, and the "impulse strength" - i.e. scaling factor, roughly, - of our forcing term.
+
+
+--- Test 4 --- 
+
+Test 3 was retried with a finer mesh separation, 0.025. This introduced interesting phenomena. 
+Reciprocal distributions maintained some locality under reconstruction (see 0th set of images, for instance), we now get the interesting issue where the reconstruction gives us
+an over-localized forcing term. I propose that this is not due to the above "locality focus" chicanery, rather because the 
+the network kernel size of 11 may be too small for the significantly larger amount of points in the mesh due to the finer separation.
+
+Also, the current design of the network includes three downsampling layers and three upsampling layers, each time pooling/unpooling by 2.
+It is possible then that the finer mesh was not sufficiently pooled by the time it reached the bottleneck and therefore the network was unable to properly study more global effects of the forcing terms.
+
+As mentioned in the Test 3 section, this test also produced similar ring-like perturbations in the reconstructed force terms. 
