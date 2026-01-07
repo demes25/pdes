@@ -1,9 +1,9 @@
-# pdes
+# PDEs
 Convolutional neural networks (CNN) and trainable meshes for solving eigenvalue and inverse problems for partial differential equations on discretized domains.
 
 This project uses TensorFlow [https://www.tensorflow.org/] and TensorFlow-Plot [https://pypi.org/project/tensorflow-plot/]. 
 
-## overview 
+## Overview 
 
 I began this project as a concrete exercise and demonstration in the utility of neural networks (NNs) in dynamics problems 
 in physics. 
@@ -22,38 +22,49 @@ Tests, logs, images, and relevant notes are stored in the 'logs' directory.
 
 More hints and comments are available in the code files.
 
-## contents
+## Contents
 
 A library that allows the construction of spatial partial differential equations on a discretized mesh. 
 This project includes modules that may be (hopefully *will* be) of use for other general applications.
 
 Ideally, this program will include an extensive library to deal with different coordinate systems and geometries.
 In its current iteration, it works for (and has differential operators defined for) flat cartesian coordinates,
-though it also includes early frameworks for handling different metrics and geometries.
+though it also includes early frameworks for handling different metrics and geometries (to be sophisticated).
 
-### classes
+### Classes
 
-- Domain - a storage class which encodes a "domain" - i.e. a collection of points. This type holds the associated coordinate ranges, discretization step sizes, and Geometry (see #typedefs). 
+#### Domain 
+A class which encodes a "domain" - i.e. a collection of points. This type holds the associated coordinate ranges, discretization step sizes, and Geometry (see #typedefs). It also contains the coordinate lattice, which is a discretized "mesh" spanning the specified coordinate ranges with the given discretization settings.
 
-- Image - a class which holds the mesh corresponding to the values of some function evaluated at each discrete point in a given Domain. It also includes the metric tensors evaluated at each point in the discretized domain. By default, we may take the image directly of a domain, which in this case simply creates the "coordinate image" - a mesh in which every point simply holds a rank-1 tensorflow tensor encoding its own coordinates.  
+#### Image
+A class which holds the lattice corresponding to the values of some function evaluated at each discrete point in a given Domain.  
 
-- System - a class which holds an operator L, forcing term f, and a bunch of constraints and boundary conditions that represents our partial differential equation system (currently only for inverse problems). It also contains a method train() to which we may pass a candidate solution network U, a domain D, and some other args, whence the system will train the given network on the PDE that the system represents. The main loss ("operator loss") is calculated by taking the ("average," see #callables below) integral of p(E) over the entire mesh, where E is the "error term" representing L[U] - f, i.e. the difference between the reconstructed forcing term and the true forcing term, and where p is the "pointwise loss" that we act on each point before we integrate (by default, it is just tf.square, so that the integrand is purely positive). The total loss is a weighted combination of the operator loss and the boundary conditions. Note that the pointwise loss and the boundary conditions may be passed as constructor arguments for a System object and as such are left up to the wisdom of the user.
+#### System 
+A class which holds an operator L, as well as a forcing term f and/or a bunch of constraints and boundary conditions that represents our partial differential equation system (currently only for inverse problems). It also contains a method train() to which we may pass a candidate solution network U and some other args, whence the system will train the given network on the PDE that the system represents. The main loss ("operator loss") is calculated by taking the ("average," see #callables below) integral of p(E) over the entire mesh, where E is the "error term" representing L[U] - f, i.e. the difference between the reconstructed forcing term and the true forcing term, and where p is the "pointwise loss" that we act on each point before we integrate (by default, it is just tf.square, so that the integrand is purely positive. tf.abs is a viable alternative). The total loss is a weighted combination of the operator loss and the boundary conditions. Note that the pointwise loss function p and the boundary conditions may be passed as constructor arguments for a System object and as such are left up to the wisdom of the user.
 
-- SpatialKernel - a keras Model subclass utilizing the U-Net architecture noted above. Instances of this class will act as our proposed solutions for inverse problems.
+#### SolutionNetwork 
+A keras Model subclass which acts as a superclass for our proposed solution networks. 
+##### SpatialKernel 
+A SolutionNetwork utilizing the U-Net architecture noted above. Instances of this class will act as our proposed solutions for inverse problems.
 
-### typedefs
+### Typedefs
 
-- Function - a callable that returns a tensorflow tensor. It is expected that functions will act on tensors I : [B, input_shape...] and return O : [B, output_shape...].
+#### Function
+Any callable that returns a tf.Tensor. Usually the input will also be a tf.Tensor with some additional args. I have chosen the convention that all "irrelevant" input axes must be collapsed into the batch axis, with the caveat that if there are NO "irrelevant" axes, the batch axis must nonetheless be added. 
+For example, if our function expects to act on a rank-2 tensor and we have a [B, n1, n2, ...] lattice of rank-2 tensors, we must first collapse the leading lattice axes into a single batch dimension. 
 
-- Geometry - a tuple of two Functions which return the metric and inverse metric, respectively, when given some batched coordinate points X : [B, N] where we have N coordinate dimensions.
+#### Functional
+Any callable that returns a Function. These are factories for Functions that take external or geometry-dependent args, such as the norm-square function which requires a specified Geometry. 
 
-- KernelBase - a tuple of containing a tensorflow tensor and a list of ints. It encodes the 'base' of some differential kernel along with its shape (the list of ints), which must then be reshaped and broadcasted according to what it is being applied to. 
+#### Distribution 
+A callable that acts a Function on a Domain and returns an Image. It expects a coordinate domain, acts a specified Function on those coordinates, and returns the resultant image. Distributions are expected to complete the "axis gymnastics" (noted above for Functions) under-the-hood so as to effectively and systematically apply Functions to Domains with arbitrary lattice dimensions. Right now, I have a couple distributions already pre-defined, such as the normalized Gaussian G(mean, variance) and the reciprocal function 1/(|x| + epsilon), among others.
 
-- Operator - a callable that acts on an Image and returns an Image. It is mostly used to type-hint differential operators (created from a KernelBase) which discretely differentiate image meshes.
+#### Operator 
+A callable that acts on an Image and returns an Image. It is mostly used to type-hint differential operators (created from a KernelBase) which discretely differentiate image meshes, but it generally refers to any Image-to-Image callable.
 
-- Distribution - also a callable that acts on an Image and returns an Image, however this is used in a different context than Operator. While Operator is usually some kind of convolution kernel, this is rather a callable that expects some coordinate image, acts a Function on those coordinates, and returns the resultant image. Right now, I have a couple distributions already defined, namely the normalized Gaussian G(mean, variance) and the reciprocal function 1/(|x| + epsilon).
+#### KernelBase 
+A tuple of containing a tensorflow tensor and a list of ints. It encodes the 'base' of some differential kernel along with its shape (the list of ints), which must then be reshaped and broadcasted according to what it is being applied to. 
 
-### callables
-
-- Integral - acts on an Image, with some args, and returns a tensorflow tensor. It uses the relevant metrics to calculate the discretized integral (Riemann sum) of the image mesh. It can also return an average (divide by total amount of points in the mesh).
+#### Geometry 
+A tuple of two Functions which return the metric and inverse metric, respectively, when given some batched coordinate points X : [B, N] where we have N coordinate dimensions.
 
