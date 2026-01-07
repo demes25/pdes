@@ -9,10 +9,10 @@ from context import *
 from keras.optimizers import Optimizer
 from keras.utils import Progbar
 from keras.models import Model
-from networks import OperatorWrapper
-
-from operators import Operator, Domain, Image
-from distributions import Distribution, Integral
+from networks import NetworkOperator
+from lattices import Domain, Image, Integral
+from operators import Operator
+from distributions import Distribution
 from typing import Callable
 
 # here we look at general systems and how to deal with them:
@@ -39,7 +39,7 @@ class System:
         # the operator that takes our desired solution to zero
         operator : Operator,
 
-        # a distribution on images that gives us the forcing term
+        # a distribution on domains that gives us the image of the forcing term
         # if none, then the forcing term is assumed to be zero.
         forcing_term : Distribution | None = None,
 
@@ -83,19 +83,19 @@ class System:
     # and act accordingly.
     def operator_loss(self, solution_image : Image, forcing_image : Image | None = None) -> tf.Tensor:
         # we apply the operator:
-        operator_image = self.operator(solution_image)
+        loss_image = self.operator(solution_image)
 
         # loss_image is the image holding the pointwise loss of the difference between Operator[U] and F
         # if F is None, then the loss image is just pointwise loss of Operator[U]
 
         # first we find the difference
-        loss_mesh = operator_image.mesh if forcing_image is None else (operator_image.mesh - forcing_image.mesh)
+        loss_grid = loss_image.grid if forcing_image is None else (loss_image.grid - forcing_image.grid)
         
         # then we apply the pointwise loss
         if self.pointwise_loss is not None:
-            loss_mesh = self.pointwise_loss(loss_mesh)
+            loss_grid = self.pointwise_loss(loss_grid)
 
-        loss_image = operator_image._mutate(new_mesh = loss_mesh)
+        loss_image.grid = loss_grid
 
         return Integral(loss_image, average=True) # we integrate the loss over the domain and return.
     
@@ -109,28 +109,48 @@ class System:
         domain : Domain, # domain over which to train. should be a collection of B points [B, N]
         optimizer : Optimizer, 
         epochs = 10,
-        boundary_weight : Callable[[int], float | tf.Tensor] | tf.Tensor = half # boundary weight function, should either be a scalar or return a scalar
+        boundary_weight : Callable[[int], float | tf.Tensor] | tf.Tensor = half, # boundary weight function, should either be a scalar or return a scalar
+        dynamic : bool = False, # allow the forcing_image to be created at each iteration from scratch
+        noise : Callable[[tf.Tensor, tf.Tensor], Operator] | None = None
     ):
         # we put a nice little progress bar for prettiness
         bar = Progbar(epochs, stateful_metrics=['operator loss', 'boundary penalty'])
-       
-        base_image = Image(domain, pad=32)
-        forcing_image = self.forcing_term(base_image)
-       
-        modelOperator = OperatorWrapper(U)
+
+        # because i wrote this before I figured out that the memory couldn't take it,
+        # i must now jump through loops to make dynamic forcing-image calculation possible. yay.
+        if dynamic:
+            # if dynamic, calculates from scratch each call
+            def forcing_image():
+                f = self.forcing_term(domain)
+                return f if noise is None else noise(f)
+        else:
+            # otherwise, stores a copy in-scope.
+            f = self.forcing_term(domain)
+            f = f if noise is None else noise(f)
+            def forcing_image():
+                return f
+            
+        modelOperator = NetworkOperator(U)
 
         if self.boundary_penalty is None:
             # boundary_weight is ignored
             for epoch in range(epochs):
                 with tf.GradientTape() as tape:
                     # we apply our model
-                    solution_image = modelOperator(forcing_image)
-                    loss_value = self.operator_loss(solution_image=solution_image, forcing_image=forcing_image) 
+                    f_ = forcing_image()
+                    solution_image = modelOperator(f_)
+                    loss_value = self.operator_loss(solution_image=solution_image, forcing_image=forcing_image()) 
+
+                del solution_image
 
                 # apply gradients
                 gradients = tape.gradient(loss_value, U.trainable_variables)
+                gradients, _ = tf.clip_by_global_norm(gradients, clip_norm = one) # clip gradients to norm 1
                 optimizer.apply_gradients(zip(gradients, U.trainable_variables))  
-
+                
+                del gradients 
+                del tape
+                
                 bar.update(epoch + 1, values=[('operator loss', loss_value.numpy()), ('loss', loss_value.numpy())])
 
         # if boundary_weight is a constant - just go about as normal

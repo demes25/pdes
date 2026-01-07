@@ -4,9 +4,8 @@
 # Operator Test
 
 from operators import *
-from keras.optimizers import AdamW
 from geometry import Euclidean
-from system import System
+from lattices import Domain, Image 
 from plots import save_plot
 
 # we test our current abilities.

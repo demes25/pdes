@@ -1,7 +1,7 @@
 # PDEs
 Convolutional neural networks (CNN) and trainable meshes for solving eigenvalue and inverse problems for partial differential equations on discretized domains.
 
-This project uses TensorFlow [https://www.tensorflow.org/] and TensorFlow-Plot [https://pypi.org/project/tensorflow-plot/]. 
+This project uses TensorFlow [https://www.tensorflow.org] and TensorFlow-Plot [https://pypi.org/project/tensorflow-plot]. 
 
 ## Overview 
 

@@ -12,16 +12,61 @@ from keras import models, layers, utils
 from typing import List
 from context import DTYPE, PACKAGE
 
-from operators import Image
+from operators import Image, Operator
 
+
+# a general parent class for our networks
+# this simply establishes the notion that the solution must exist in some n-dimensional manifold ('dims')
+# and have some consistent output shape for all input. 
+@utils.register_keras_serializable(package=PACKAGE)
+class SolutionNetwork(models.Model):
+    def __init__(
+        self, 
+        dims, # amount of dimensions
+        shape : List[int] = [], # output shape - by default a scalar field
+        
+        dtype = DTYPE, # we choose dtype, if wanted
+        **kwargs
+    ):
+        super().__init__(dtype=dtype, **kwargs)
+
+        self.dims = dims # amount of spatial dimensions
+        self.shape = shape 
+
+    # we add the standard boilerplate for serializability
+    @classmethod 
+    def from_config(cls, config : dict):
+        return cls(**config)
+    
+    def get_config(self) -> dict:
+        config = super().get_config()
+        config.update({
+            'dims' : self.dims,
+            'shape' : self.shape
+        })
+        return config
+    
+
+    # a function to act an instance of the inheriting class on an Image object to be called on by an instance of the inheriting class.
+    # by default, it returns the input image
+    def act_on_image(self, image : Image) -> Image:
+        return image
+
+
+# wraps our solution networks as operators.
+def NetworkOperator(U : SolutionNetwork) -> Operator:
+    return U.act_on_image
+
+
+
+# --- THE SPATIAL KERNEL --- #
 
 # this is a multi-kernel convolutional layer that works on
-# the given amount of spatial dimensions
+# a given amount of spatial dimensions
 #
 # TODO: work on time-dependence and causality.
 @utils.register_keras_serializable(package=PACKAGE)
 class KernelLayer(layers.Layer):
-    # TODO: MAKE
     def __init__(self, 
                 dims = 1, # amount of spatial dimensions
                 filters = 64, # output channels 
@@ -76,7 +121,9 @@ class KernelLayer(layers.Layer):
         return cls(**config)
 
     def get_config(self) -> dict:
-        return {**self.internal_config, **super().get_config()}
+        config = super().get_config()
+        config.update(self.internal_config)
+        return config
     
 
     # tensor - an input of shape [B, n1, n2, ..., nN, I]
@@ -91,28 +138,45 @@ class KernelLayer(layers.Layer):
 
 # This is built based on the U-Net architecture
 # https://www.sciencedirect.com/topics/computer-science/u-net
+#
+# NOTE: This system currently only supports square (or cube) lattices with side length divisible by pool_size^depth.
+# i.e. a tensor of shape [B, (T), N, N, N, *S].
+# note that N here must take into account the relevant padding. so for a square mesh with unpadded side length L,
+# (L + 2*padding) must be divisible by (pool_size^depth)
+#
+# TODO: generalize from the above restraint
+#
+# TODO: ENFORCE NAN CHECKS!
 @utils.register_keras_serializable(package=PACKAGE)
-class SpatialKernel(models.Model):
+class SpatialKernel(SolutionNetwork):
     
     def __init__(self, 
+                 dims, # amount of SPATIAL dimensions
                  shape : List[int] = [], # output shape - by default a scalar field
                  
-                 dims = 1, # amount of spatial dimensions
                  size = 3, # kernel size
 
+                 depth = 5, # encoder depth, should be a function of the size of our desired domain and the pooling factor.
+                 # for the receptive field to cover the entire domain lattice, the depth and pool size should be selected such that
+                 # pool_size ^ depth >= lattice side length
+
+                 pool_size = 2, # the pooling factor. # TODO: make this general along each spatial dimension
+                 
+                 init_filters = 16, # the amount of filters that the first kernel has. this will scale by *pool_size per each downsizing.
                  activation = 'gelu',
-                
+                 
                  dtype = DTYPE, # we choose dtype, if wanted
                  **kwargs
                  ):
 
-        super().__init__(dtype=dtype, **kwargs)
+        super().__init__(dims=dims, shape=shape, dtype=dtype, **kwargs)
 
         # for serializability
         self.internal_config = {
-            'shape' : shape,
-            'dims' : dims,
             'size' : size,
+            'depth' : depth,
+            'init_filters' : init_filters,
+            'pool_size' : pool_size,
             'activation' : activation
         }
 
@@ -124,40 +188,46 @@ class SpatialKernel(models.Model):
         self.shape = shape
         self._dtype = dtype
         self.dims = dims
+        self.depth = depth
         
         # the first layer -- encoder
         # 'encodes' the forcing signal
         # consists of a chain of convolutions and pooling, where 
         # each time we increase the filter count.
-        self.enc1 = KernelLayer(dims=dims, filters=64, size=size, padding='same', activation=activation)
-        self.down1 = KernelLayer(dims=dims, filters=128, size=size, padding='same', activation=activation, pool_size=2)
+        self.encoders = [] # the convolutions
+        self.downsizers = [] # the pooling (really these are pooled convolutions, not pure pooling)
         
-        self.enc2 = KernelLayer(dims=dims, filters=128, size=size, padding='same', activation=activation)
-        self.down2 = KernelLayer(dims=dims, filters=256, size=size, padding='same', activation=activation, pool_size=2)
+        k = init_filters
 
-        self.enc3 = KernelLayer(dims=dims, filters=256, size=size, padding='same', activation=activation)
-        self.down3 = KernelLayer(dims=dims, filters=512, size=size, padding='same', activation=activation, pool_size=2)
+        for _ in range(depth):
+            enc = KernelLayer(dims=dims, filters=k, size=size, padding='same', activation=activation)
+            k *= pool_size
+            down = KernelLayer(dims=dims, filters=k, size=size, padding='same', activation=activation, pool_size=pool_size)
 
+            self.encoders.append(enc)
+            self.downsizers.append(down)
         
         # the second layer -- bottleneck
         # consists of a couple high-filter convolutions.
-        self.bottleneck1 = KernelLayer(dims=dims, filters=512, size=size, padding='same', activation=activation)
-        self.bottleneck2 = KernelLayer(dims=dims, filters=512, size=size, padding='same', activation=activation)
+        self.bottleneck1 = KernelLayer(dims=dims, filters=k, size=size, padding='same', activation=activation)
+        self.bottleneck2 = KernelLayer(dims=dims, filters=k, size=size, padding='same', activation=activation)
 
         # the third layer -- decoder
-        # consists of some concatenations and transpose convolutions that amplify the solution signal back.
-        self.up1 = KernelLayer(dims=dims, filters=256, size=size, padding='same', activation=activation, transpose=True, strides=2)
-        self.dec1 = KernelLayer(dims=dims, filters=256, size=size, padding='same', activation=activation)
+        # consists of some strided convolutions, concatenations and transpose convolutions that amplify the solution signal back.
+        self.upsizers = [] # the strided transpose convolutions
+        self.decoders = [] # the unstrided transpose convolutions
 
-        self.up2 = KernelLayer(dims=dims, filters=128, size=size, padding='same', activation=activation, transpose=True, strides=2)
-        self.dec2 = KernelLayer(dims=dims, filters=128, size=size, padding='same', activation=activation)
+        for _ in range(depth):
+            k //= pool_size
+            up = KernelLayer(dims=dims, filters=k, size=size, padding='same', activation=activation, transpose=True, strides=pool_size)
+            dec = KernelLayer(dims=dims, filters=k, size=size, padding='same', activation=activation)
 
-        self.up3 = KernelLayer(dims=dims, filters=64, size=size, padding='same', activation=activation, transpose=True, strides=2)
-        self.dec3 = KernelLayer(dims=dims, filters=64, size=size, padding='same', activation=activation)
+            self.upsizers.append(up)
+            self.decoders.append(dec)
 
         # the final layer - output
         self.output_layer = KernelLayer(dims=dims, filters=output_channels, size=size, activation=None)
-        
+
 
     # we add the standard boilerplate for serializability
     @classmethod 
@@ -165,61 +235,73 @@ class SpatialKernel(models.Model):
         return cls(**config)
     
     def get_config(self) -> dict:
-        return {**self.internal_config, **super().get_config()}
+        config = super().get_config()
+        config.update(self.internal_config)
+        return config
     
 
-    # input : domain [B, X, Y, Z, ...] - a mesh
-    # output : [B, X', Y', Z', ..., self.shape] - a set of B tensors corresponding to the field values at each given point 
+    # input : domain [B, X, Y, Z, ..., -1] - a lattice with its entry_shape squished to [-1]
+    # output : [B, X', Y', Z', ..., *self.shape] - a set of B tensors corresponding to the field values at each given point 
     def call(self, x : tf.Tensor) -> tf.Tensor:
-        # encode
-        e1 = self.enc1(x)   
-        d1 = self.down1(e1)    
 
-        e2 = self.enc2(d1)
-        d2 = self.down2(e2)
-
-        e3 = self.enc3(d2)
-        d3 = self.down3(e3)
+        # encode + track encodings + downsize
+        encodings = [] # tf.TensorArray(dtype=self._dtype, size=self.depth, dynamic_size=False, clear_after_read=True)
+        y = x # the starting y is our initial input
+        for enc, down in zip(self.encoders, self.downsizers):
+            # repeatedly encode and downsize, store the encodings to later append to corresponding decodings
+            y = enc(y) # encode -> now y holds the encoding of whatever y previously was
+            encodings.append(y) # append the encodings array before we reassign 
+            y = down(y) # reassign to y the downsizing of the encoding
 
         # bottleneck
-        b = self.bottleneck1(d3)
-        b = self.bottleneck2(b)
+        y = self.bottleneck1(y)
+        y = self.bottleneck2(y)
 
-        # decode + concatenate earlier encodings
-        u1 = self.up1(b)
-        u1 = tf.concat([u1, e3], axis=-1)
-        u1 = self.dec1(u1)
-
-        u2 = self.up2(u1)
-        u2 = tf.concat([u2, e2], axis=-1)
-        u2 = self.dec2(u2)
-
-        u3 = self.up3(u2)
-        u3 = tf.concat([u3, e1], axis=-1)
-        u3 = self.dec3(u3)
+        # upsize + concatenate earlier encodings + decode
+        for up, dec in zip(self.upsizers, self.decoders):
+            y = up(y)
+            # concatenate to the corresponding encoding. this will effectively follow the encodings array in reverse, 
+            # so we can proceed by repeatedly popping from the end
+            y0 = encodings.pop(-1)
+            y = tf.concat([y, y0], axis=-1) # concatenate the two and pass to the decoder
+            y = dec(y)
 
         # output
-        out = self.output_layer(u3)
-        out = tf.reshape(out, tf.concat([tf.shape(out)[:-1], self.shape], axis=0))
-
+        out = self.output_layer(y) # pass through the output layer
+        
         return out
         
 
-
-# wraps models as operators.
-def OperatorWrapper(U : models.Model):
-    def _h(phi : Image) -> Image:
+    # we act on an image
+    # since the image holds [B, (T), X, Y, Z, ..., *entry_shape], and call() expects:
+    #       - no temporal dimension
+    #       - the value shape to be flattened at the end,
+    #
+    # we must first reshape accordingly before we can do call
+    def act_on_image(self, image : Image) -> Image:
+        # we check if the image contains a temporal dimension.
         
-        re_shape = tf.concat([phi.padded_mesh_shape, [-1]], axis=0)
-        x = tf.expand_dims(tf.reshape(phi.mesh, re_shape), axis=0)
+        leading_shape = image.leading_shape
 
-        Uphi = U(x)
-        Uphi = tf.squeeze(Uphi, axis=0)
+        # if our domain is 'timed':
+        if image.domain.timed:
+            start_shape = [image.batches * leading_shape[1]] # the first two axes are batch and time
+            mid_shape = leading_shape[2:] 
+            end_shape = [-1]
 
-        return Image(phi.domain, mesh=Uphi, geometry=phi.geometry, pad=phi.pad)
+            input_shape = tf.concat([start_shape, mid_shape, end_shape], axis=0)
+        
+        else:
+            # otherwise: the first axis is B and the rest of the lattice is purely spatial
+            input_shape = tf.concat([leading_shape, [-1]], axis=0)
 
-    return _h
+        x = tf.reshape(image.view(padded=True), shape=input_shape)
 
+        # we preparet to reshape the output to [B, (T), X, Y, Z, ..., *self.shape] 
+        output_shape = tf.concat([leading_shape, self.shape], axis=0)
+        
+        # we act on the properly shaped input x, and cast to the desired output shape
+        output = tf.reshape(self(x), shape=output_shape)
 
-
-
+        # return the resulting image
+        return Image(domain=image.domain, grid=output, shape=output_shape, entry_shape=self.shape)

@@ -74,6 +74,15 @@ def reciprocal_fn(center : tf.Tensor, epsilon = 1e-7) -> Function:
     return _h 
 
 
+# we get wave functions sin or cos. wavenumber must be [N] or []
+# if we want cosine, call like sine_fn(..., co=True)
+def sine_fn(wavenum : tf.Tensor = one, offset : tf.Tensor = zero):
+    
+    def _h(x): 
+        return tf.reduce_prod(tf.sin(wavenum * x + offset), axis=-1) # multiplies sines of each coordinate
+    
+    return _h
+
 
 # we define the constant function - if necessary
 def constant_fn(c : tf.Tensor) -> Function:

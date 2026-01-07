@@ -1,9 +1,21 @@
 import tensorflow as tf
+from typing import Sequence
+from keras import backend
+PACKAGE : str = 'PDEs'
 
-PACKAGE : str = 'Lagrangian'
+MIXED = False
 
 # define global things here
 DTYPE : tf.DType = tf.float32
+backend.set_floatx(DTYPE.name)
+
+if MIXED:
+    from keras import mixed_precision
+
+    mixed_precision.set_global_policy('mixed_float16')
+
+
+Shape = Sequence[int] | tf.TensorShape | tf.Tensor
 
 # some useful c-numbers
 zero : tf.Tensor = tf.constant(0, dtype=DTYPE)

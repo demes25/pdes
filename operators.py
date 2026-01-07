@@ -6,251 +6,9 @@
 
 from context import *
 from typing import Callable, Tuple, List, Sequence
-from geometry import Function, Geometry
-
-
-# --- DOMAINS --- #
-
-# this is a wrapped tensor dataclass that can discretize a given range of values
-# TODO: generalize to other discretization methods. right now it just makes a linear mesh
-class Domain:
-    def __init__(
-        self,
-        geometry : Geometry, # a pair of functions, each of which return [B, N, N]
-        ranges : tf.Tensor, # should be a [2, N] tensor,
-        steps : tf.Tensor, # should be a [N] tensor  
-
-        pad = 0 # we allow padding around the boundary for convolution purposes
-    ):
-        
-        # this is N
-        self.dimension = int(tf.shape(ranges)[1].numpy())
-        
-        # TODO: make a 'convolvable mesh' which has padded dimensions for convolvability purposes.
-        # or do some other workaround for the padding problem
-
-        self.ranges = ranges 
-        self.steps = steps
-
-        # the unpadded shape !!
-        self.shape = tf.cast((ranges[1] - ranges[0])/steps, tf.int32)
-
-        self._dtype = tf.as_dtype(self.ranges.dtype)
-
-        self.geometry = geometry
-
-    # we discretize.
-    #
-    # the input is X [2, N] (the ranges) and dX [N] (the step sizes)
-    #
-    # where N is the dimension count, the first col tells us starting points and 
-    # second col tells us ending points.
-    #
-    # dX tells us how far away points should be in each dimension.
-    #
-    # so this will give an [n**N, N] grid
-    #
-    # for now this splits our ranges linearly via tf.linspace
-    # but this is slightly suspect for more nontrivial geometries, like spherical
-    # still, though, should work not too bad.
-    #
-    # we use meshgrid to produce a cartesian product of linspaces
-    # as such I will make the indexing adjustable depending on how we want it
-    def discretize(self, pad=0, indexing='ij') -> tf.Tensor: 
-
-        if pad == 0:
-            X = self.ranges 
-        else:
-            padder = self.steps * pad
-            # pad evenly all around
-            padding = tf.stack([-padder, padder], axis=0)
-            X = self.ranges + padding
-        
-        dX = self.steps
-
-        grid_slices = []
-
-        starts = X[0]
-        ends = X[1]
-
-        for i in range(tf.shape(starts)[0]):
-            start = starts[i]
-            end = ends[i]
-            spacing = dX[i]
-            
-            # TODO: this can be made more general to take 'spacing' as literal distance
-            # and use the metric at a given point to find the next discrete point by this measure of distance
-            
-            n = (end - start)/spacing # we find the amount of points
-            n = tf.cast(n, tf.int32) # must be integer
-
-            new_slice = tf.linspace(start, end, n) # from x[0] to x[1], n discrete points
-
-            grid_slices.append(new_slice)
-        
-        grid = tf.meshgrid(*grid_slices, indexing=indexing)
-
-        # then we stack along the last axis
-        return tf.stack(grid, axis=-1)
-    
-
-# we create images - which are objects
-# that wrap meshes and include their metadata (shape, padding, metric, etc)
-
-# --- IMAGES --- #
-
-# this is a helper function - it is a list of slices that throws away the 
-# specified amount of padding.
-def padding_adjuster(
-        pad, # the amount of padding to "throw away" 
-
-        mesh_len, # the amount of axes to cut
-        # the leading axes are assumed to be the mesh axes
-
-        func_len = 0 # the amount of axes not to cut (assumed scalar function, len = 0)
-        # the ending axes are assumed to be the function axes
-
-        # if we take the mesh to look like [n1, n2, ..., nN, f1, f2, ... fF]
-        # where n1, n2 are the mesh axes and f1, f2... are the component axes of 
-        # the function evaluated at the corresponding mesh points,
-        # 
-        # then mesh_len = N
-        # and func_len = F
-    ) -> List[slice]:
-
-    if pad == 0:
-        # if the padding is 0, we just return [:,:,:,...]
-        return [slice(None) for _ in range(mesh_len+func_len)]
-    
-    # we return [pad:-pad, pad:-pad, ..., pad:-pad, :, :, ..., :]
-    pad_slice = slice(pad, -pad)
-    
-    if func_len == 0:
-        return [pad_slice for _ in range(mesh_len)]
-    
-    return [pad_slice for _ in range(mesh_len)] + [slice(None) for _ in range(func_len)]
-    
-
-class Image:
-    def __init__(
-        self,
-        domain : Domain, # the domain
-
-        mesh : tf.Tensor = None, # the mesh that we wrap here, a tensor of the shape [n1, n2, ..., nN, *F] where F is the shape of the mesh value at (x1, x2, ..., xN)
-        
-        shape : tf.Tensor = None, # by default, if shape and main are None, we discretize the domain points here and store the 'base mesh' 
-
-        geometry : Tuple[tf.Tensor, tf.Tensor] | None = None, # we pass tensors of the metric and inverse metric evaluated at the domain mesh points.
-        # this should be none  ^^ only if mesh is None
-
-        pad = 0, # how much padding we have
-    ):
-        self.domain = domain
-        
-        if mesh is None:
-            # if the mesh is None -- this becomes a coordinate image.
-            # the discretized domain.
-            self.mesh = domain.discretize(pad=pad)
-        else:
-            self.mesh = mesh
-
-        if shape is None:
-            shape = tf.shape(self.mesh)
-
-        self.shape = shape 
-        self.padded_mesh_shape = shape[:domain.dimension] # we find the shape of the padded mesh, we keep as a tensor. [n1 + 2p, n2 + 2p, n3 + 2p, ... nN + 2p]
-        self.func_shape = shape[domain.dimension:].numpy().tolist() # we keep this as a list for manipulability, this is F from a bove
-
-        # note that the unpadded mesh shape [n1, n2, n3, ..., nN] is stored in domain.shape 
-        self.pad = pad
-
-        # "unpads" the padded mesh
-        self.unpadded_slicer = padding_adjuster(pad, mesh_len=domain.dimension, func_len = len(self.func_shape))
-
-        if geometry is None:
-            assert mesh is None, 'Parameter "geometry" may only be None if we are calculating the image directly of the domain points'
-            # ^^ otherwise we must re-calculate the (hypothetically already calculated) mesh to find the metric tensors, which is costly 
-
-            # functions expect something like [B, N]
-            # so we use the flattened mesh
-            x = tf.reshape(self.mesh, shape=[-1, domain.dimension])
-
-            # we then apply the geometry functions
-            g, g_inv = domain.geometry
-
-            g = g(x) 
-            g_inv = g_inv(x)
-            # ^^ these are now both [B, N, N], evaluated at all points in the mesh
-
-            # we now reshape each of them back:
-            re_shape = tf.concat([self.padded_mesh_shape, [domain.dimension, domain.dimension]], axis=0)
-
-            g = tf.reshape(g, shape=re_shape)
-            g_inv = tf.reshape(g, shape=re_shape)
-
-            # these are now [n1, n2, ..., nN, N, N]
-            self.geometry = (g, g_inv)
-        
-        else:
-            self.geometry = geometry 
-
-
-    def view(self, padded=False, flattened=False) -> tf.Tensor:
-        # we view the mesh.
-        # this is good if we have padding - we can view with/without padding at will.
-        mesh = self.mesh if padded else self.mesh[self.unpadded_slicer]
-
-        # we can also flatten if needed, such as for function application
-        return tf.reshape(mesh, shape=[-1, *self.func_shape]) if flattened else mesh
-
-    def _mutate(self, new_mesh : tf.Tensor, new_func_shape : List[int] | None = None) -> 'Image':
-        # mutates this image:
-        # if we want to hold the mesh of a new function, 
-        # but we have the same padded_mesh_shape 
-        # and overall metadata
-        self.mesh = new_mesh 
-
-        if new_func_shape is not None:
-            self.func_shape = new_func_shape 
-            self.unpadded_slicer = padding_adjuster(self.pad, mesh_len=self.domain.dimension, func_len = len(self.func_shape))
-
-        return self 
-    
-    def apply(self, f : Function, mutable = True) -> 'Image':
-        # acts the given function on this image.
-        # if in_place, acts directly onto self.mesh
-        # if not, then it returns a new image with the function applied.
-
-        X = self.view(padded=True, flattened=True)
-        f = f(X)
-
-        func_shape = tf.shape(f)[1:]
-        
-        # if the function is a scalar:
-        # then we adjust func_shape to be []
-        if len(func_shape) == 0 or (len(func_shape) == 1 and func_shape[0] == 1):
-            total_shape = self.padded_mesh_shape
-            func_shape = []
-        else:
-            total_shape = tf.concat([self.padded_mesh_shape, func_shape], axis=0)
-            func_shape = func_shape.numpy().tolist()
-
-        func_mesh = tf.reshape(f, shape=total_shape)
-
-        # if we can alter in-place, we do so.
-        if mutable:
-            return self._mutate(
-                func_mesh,
-                func_shape
-            )
-            
-        else:
-        # otherwise we return a new image.
-            return Image(self.domain, func_mesh, total_shape, self.geometry, self.pad)
+from lattices import Image
 
     
-
-
 # --- KERNELS --- #
 
 # we define kernels for differential operators
@@ -323,23 +81,21 @@ def prep_for_kernel(image : Image):
 
     # in all, substrate shape should look like   mesh_shape + func_shape
 
-    func_size = tf.reduce_prod(image.func_shape)
-
-    if tf.size(image.func_shape) == 0:
+    if image.rank == 0:
+        # this will just be our default treatment of scalars (rank 0) - expand them to act as rank 1.
+        val_size = 1
         # expand out so our function out size becomes 1
-        substrate = tf.expand_dims(image.mesh, axis=-1)
-        # this will just be our default treatment of scalars - expand them to have dimension 1.
-    
+        substrate = tf.expand_dims(image.grid, axis=-1)
     else:
+        val_size = tf.reduce_prod(image.entry_shape)
+        
         # we compress our function output shape - we will later reshape this back
-        reduction_shape = tf.concat([image.padded_mesh_shape, [func_size]], axis=0)
-        substrate = tf.reshape(image.mesh, shape=reduction_shape)
-    
-    substrate = tf.expand_dims(substrate, axis=0)
+        reduction_shape = tf.concat([image.leading_shape, [val_size]], axis=0)
+        substrate = tf.reshape(image.grid, shape=reduction_shape)
 
     # we return the prepped substrate,
     # and the relevant dim_out for convolution also
-    return (substrate, func_size)
+    return (substrate, val_size)
 
 
 # --- OPERATORS --- # 
@@ -381,18 +137,13 @@ def ConvolveIter(
             outputs.append(output)
         
         # stack along the final axis
-        final_mesh = tf.stack(outputs, axis=-1)
+        final_grid = tf.stack(outputs, axis=-1)
 
+        # apply the output gate if present
         if output_gate is not None:
-            final_mesh = output_gate(final_mesh, phi)
+            final_grid = output_gate(final_grid, phi)
 
-        final_shape = tf.shape(final_mesh)
-
-        # ok. now we correct the padding of the geometry functions:
-        # this operator reduces the padding by one, so we also adjust like so:
-        dphi = Image(domain=domain, mesh=final_mesh, shape=final_shape, geometry=phi.geometry, pad=phi.pad)
-        
-        return dphi
+        return Image(domain=domain, grid=final_grid, entry_shape=domain.entry_shape)
     
     return _h 
 
@@ -420,12 +171,12 @@ def Partials(
         if wrt:
             dX = tf.gather(dX, indices=wrt, axis=0)
         
-        dims = phi.domain.dimension
+        dims = phi.dimension
         M = new_dim or dims
         
         # and the output mesh looks like [*mesh_shape, *func_shape, M]
         # so we reshape dX like so:
-        dX = tf.reshape(dX, shape = [1] * (dims + len(phi.func_shape)) + [M])
+        dX = tf.reshape(dX, shape = [1] * (dims + phi.rank) + [M])
 
         return output_mesh/dX
     
@@ -461,14 +212,14 @@ def DiagonalSecondPartials(
         if wrt:
             dX = tf.gather(dX, indices=wrt, axis=0)
         
-        dims = phi.domain.dimension
+        dims = phi.dimension
         M = new_dim or dims
         
         dX_sq = tf.square(dX)
 
         # and the output mesh looks like [*mesh_shape, *func_shape, M]
         # so we reshape dX like so:
-        dX_sq = tf.reshape(dX_sq, shape = [1] * (dims + len(phi.func_shape)) + [M])
+        dX_sq = tf.reshape(dX_sq, shape = [1] * (dims + phi.rank) + [M])
 
         return output_mesh/dX_sq
     
@@ -483,15 +234,25 @@ HessianDiagonal : Operator = DiagonalSecondPartials()
 
 
 # the Laplacian operator in flat-space - sums the diagonal second partials
-def FlatLaplacian(phi : Image) -> Image:
-    second_partials = HessianDiagonal(phi)
-
-    partials_mesh = second_partials.mesh 
+def FlatSpatialLaplacian(phi : Image) -> Image:
+    partials_grid = HessianDiagonal(phi).grid
     # sum through the coordinate second partials to get the flat laplacian
-    laplacian_mesh = tf.reduce_sum(partials_mesh, axis=-1)
+    laplacian_grid = tf.reduce_sum(partials_grid, axis=-1)
+
+    return Image(domain=phi.domain, grid=laplacian_grid, shape=phi.shape, entry_shape=phi.entry_shape)
+
+
+
+# I am adding a noise operator that will introduce noise into the image
+def NoiseOperator(mean : tf.Tensor = zero, stddev : tf.Tensor = one) -> Operator:
+    def _h(x : Image) -> Image:
+        noise = tf.random.normal(shape=x.shape, mean=mean, stddev=stddev, dtype=x.grid.dtype)
+
+        return Image(domain=x.domain, grid=x.grid + noise, shape=x.shape, entry_shape=x.entry_shape, leading_shape=x.leading_shape, batches=x.batches)
     
-    return second_partials._mutate(new_mesh=laplacian_mesh, new_func_shape=phi.func_shape)
-    
+    return _h
+
+
 '''
 
 # this is the vector divergence, div(A) = 1/sqrt(g) d_mu sqrt(g) A^mu
